@@ -130,7 +130,6 @@ def generate_pdf_report(results, analysis_output_dir, buffer_info, height, kml_d
     
     # Header with logos and title
     story.append(Paragraph("Relatório de Análise de Área de Voo", title_style))
-    story.append(Paragraph("RPA: SwissDrones SDO 50 V3", subtitle_style))
     story.append(Paragraph(f"Data: {datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y às %H:%M')}", subtitle_style))
     story.append(Spacer(1, 0.8*cm))
     
