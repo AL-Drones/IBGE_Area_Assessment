@@ -52,7 +52,6 @@ BR1KM_URL = (
     "grade_estatistica/censo_2022/grade_1km/BR1KM_20251002.zip"
 )
 BR1KM_DIR = "dados_ibge/grade_1km"
-BR1KM_SHP = os.path.join(BR1KM_DIR, "BR1KM_20251002.shp")
 
 # In-memory cache — loaded once per process
 _GRID_1KM = None
@@ -62,7 +61,12 @@ _GRID_1KM = None
 # Grid loading
 # ---------------------------------------------------------------------------
 
-def carregar_grid_1km() -> gpd.GeoDataFrame:
+def _encontrar_shp(pasta: str) -> str | None:
+    """Return the first .shp file found inside *pasta*, or None."""
+    for fname in os.listdir(pasta):
+        if fname.lower().endswith('.shp'):
+            return os.path.join(pasta, fname)
+    return None
     """
     Download (once) and load the IBGE 1km unified grid for Brazil.
     The result is cached in memory for the lifetime of the process.
@@ -72,8 +76,13 @@ def carregar_grid_1km() -> gpd.GeoDataFrame:
     if _GRID_1KM is not None:
         return _GRID_1KM
 
-    if not os.path.exists(BR1KM_SHP):
-        os.makedirs(BR1KM_DIR, exist_ok=True)
+    os.makedirs(BR1KM_DIR, exist_ok=True)
+
+    # Find an already-extracted shapefile (name may vary between IBGE releases,
+    # e.g. BR1KM.shp or BR1KM_20251002.shp)
+    shp_path = _encontrar_shp(BR1KM_DIR)
+
+    if shp_path is None:
         print("⬇ Downloading BR1KM grid (one-time operation, ~large file)...")
         try:
             resp = requests.get(BR1KM_URL, timeout=300, stream=True)
@@ -86,8 +95,14 @@ def carregar_grid_1km() -> gpd.GeoDataFrame:
             print(f"✗ Error downloading BR1KM grid: {exc}")
             return None
 
-    print("⏳ Loading BR1KM grid into memory...")
-    _GRID_1KM = gpd.read_file(BR1KM_SHP).to_crs(epsg=4326)
+        shp_path = _encontrar_shp(BR1KM_DIR)
+
+    if shp_path is None:
+        print("✗ No .shp file found after extraction — check the ZIP contents.")
+        return None
+
+    print(f"⏳ Loading {os.path.basename(shp_path)} into memory...")
+    _GRID_1KM = gpd.read_file(shp_path).to_crs(epsg=4326)
     print(f"✓ BR1KM grid loaded: {len(_GRID_1KM):,} cells")
     return _GRID_1KM
 
@@ -200,7 +215,11 @@ def calcular_area_km2(geom) -> float:
 
 def calcular_estatisticas(dados_proj: gpd.GeoDataFrame, area_geom=None) -> tuple:
     """
-    Compute summary statistics from a projected GeoDataFrame.
+    Compute summary statistics from a projected (Albers) GeoDataFrame.
+
+    Uses TOTAL_POND (area-weighted population) when present; falls back to
+    raw TOTAL otherwise.  densidade_maxima is the highest per-cell density
+    among the clipped cells, also weighted.
 
     Returns:
         (total_pessoas, area_km2, densidade_media, densidade_maxima)
@@ -208,7 +227,8 @@ def calcular_estatisticas(dados_proj: gpd.GeoDataFrame, area_geom=None) -> tuple
     if dados_proj.empty:
         return 0, 0.0, 0.0, 0.0
 
-    total_pessoas = float(dados_proj['TOTAL'].sum())
+    pop_col = 'TOTAL_POND' if 'TOTAL_POND' in dados_proj.columns else 'TOTAL'
+    total_pessoas = float(dados_proj[pop_col].sum())
 
     if area_geom is not None:
         proj = gpd.GeoSeries([area_geom], crs='EPSG:4326').to_crs(ALBERS_BR)
@@ -258,26 +278,56 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
         print("✗ BR1KM grid unavailable — aborting.")
         return None
 
-    # Spatial filter using the R-tree index for speed
+    # --- Step 1: R-tree pre-filter (bounding box) ---
     candidate_idx = list(grid.sindex.intersection(area_geom.bounds))
     if not candidate_idx:
         print("⚠ No grid cells found in bounding box.")
         return None
 
-    dados = grid.iloc[candidate_idx].copy()
-    dados = dados[dados.intersects(area_geom)].copy()
+    possible_matches = grid.iloc[candidate_idx].copy()
 
-    if dados.empty:
+    # --- Step 2: Weighted intersection ---
+    # Overlay keeps only the portion of each cell that falls inside area_geom.
+    # frac_area = clipped_cell_area / original_cell_area
+    # TOTAL_POND = TOTAL * frac_area  (population proportional to covered area)
+    area_gdf = gpd.GeoDataFrame(geometry=[area_geom], crs=possible_matches.crs)
+    intersec = gpd.overlay(possible_matches, area_gdf, how='intersection')
+
+    if intersec.empty:
         print("⚠ No grid cells intersect the analysis area.")
         return None
 
-    print(f"✓ {len(dados):,} cells selected from BR1KM grid")
+    # Original cell areas (same CRS — WGS84; ratio is dimensionless, so no
+    # reprojection needed here, but we reproject to get stable m² values)
+    orig_proj = possible_matches.to_crs(ALBERS_BR)
+    orig_proj.index = possible_matches.index          # align index
+    orig_areas = orig_proj.geometry.area              # m²
 
-    # Project and compute density
-    dados_proj = dados.to_crs(ALBERS_BR)
-    dados_proj['area_km2'] = dados_proj.geometry.area / 1e6
-    dados_proj['densidade_pop_km2'] = dados_proj['TOTAL'] / dados_proj['area_km2']
-    dados['densidade_pop_km2'] = dados_proj['densidade_pop_km2'].values
+    intersec_proj = intersec.to_crs(ALBERS_BR)
+    intersec_proj['area_intersec'] = intersec_proj.geometry.area  # m²
+
+    # Map original area back using the grid's index preserved by overlay
+    # gpd.overlay resets index; use the positional index from possible_matches
+    intersec_proj['area_original'] = orig_areas.reindex(
+        possible_matches.index
+    ).values[:len(intersec_proj)]
+
+    intersec_proj['frac_area'] = (
+        intersec_proj['area_intersec'] / intersec_proj['area_original']
+    ).clip(0, 1)                                       # guard fp rounding
+
+    intersec_proj['TOTAL_POND'] = intersec_proj['TOTAL'] * intersec_proj['frac_area']
+    intersec_proj['area_km2']   = intersec_proj['area_intersec'] / 1e6
+    intersec_proj['densidade_pop_km2'] = (
+        intersec_proj['TOTAL_POND'] / intersec_proj['area_km2']
+    )
+
+    # Carry density back to the WGS84 GeoDataFrame used for plotting
+    dados = intersec.copy()
+    dados['densidade_pop_km2'] = intersec_proj['densidade_pop_km2'].values
+    dados['TOTAL_POND']        = intersec_proj['TOTAL_POND'].values
+
+    print(f"✓ {len(dados):,} clipped cells (weighted intersection)")
 
     # --- Figure ---
     area_analise_km2 = calcular_area_km2(area_geom)
@@ -333,7 +383,7 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
         print(f"⚠ Could not add basemap: {exc}")
 
     total_pessoas, area_km2, densidade_media, densidade_maxima = calcular_estatisticas(
-        dados_proj, area_geom
+        intersec_proj, area_geom
     )
 
     info_texto = (
