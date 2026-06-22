@@ -63,13 +63,20 @@ _GRID_1KM = None
 
 def _encontrar_shp(pasta: str) -> str | None:
     """Return the first .shp file found inside *pasta*, or None."""
+    if not os.path.isdir(pasta):
+        return None
     for fname in os.listdir(pasta):
         if fname.lower().endswith('.shp'):
             return os.path.join(pasta, fname)
     return None
+
+
+def carregar_grid_1km() -> gpd.GeoDataFrame:
     """
     Download (once) and load the IBGE 1km unified grid for Brazil.
     The result is cached in memory for the lifetime of the process.
+    The shapefile name inside the ZIP may vary between IBGE releases
+    (e.g. BR1KM.shp or BR1KM_20251002.shp); _encontrar_shp handles that.
     """
     global _GRID_1KM
 
@@ -78,8 +85,6 @@ def _encontrar_shp(pasta: str) -> str | None:
 
     os.makedirs(BR1KM_DIR, exist_ok=True)
 
-    # Find an already-extracted shapefile (name may vary between IBGE releases,
-    # e.g. BR1KM.shp or BR1KM_20251002.shp)
     shp_path = _encontrar_shp(BR1KM_DIR)
 
     if shp_path is None:
@@ -178,7 +183,7 @@ def criar_legenda_areas(layers_poligonos: dict, layers_para_mostrar: list,
 
 
 def criar_colormap_melhorado():
-    """White → yellow → red colormap for population density."""
+    """White -> yellow -> red colormap for population density."""
     colors = [
         '#FFFFFF', '#FFF9E6', '#FFF3CC', '#FFECB3', '#FFE599',
         '#FFDB80', '#FFD166', '#FFC14D', '#FFB133', '#FFA31A',
@@ -253,16 +258,21 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
                    layers_para_mostrar: list, buffer_info: dict = None,
                    output_path: str = None) -> dict | None:
     """
-    Clip the BR1KM grid to *area_geom*, compute density, and render a map.
+    Clip the BR1KM grid to *area_geom* using weighted intersection,
+    compute density, and render a map.
+
+    Weighted intersection:
+        frac_area   = clipped_cell_area / original_cell_area
+        TOTAL_POND  = TOTAL * frac_area
 
     Parameters
     ----------
-    area_geom       : shapely geometry (WGS84) defining the analysis area
-    titulo          : map title
-    layers_poligonos: dict of layer geometries for boundary drawing
-    layers_para_mostrar: ordered list of layer names to draw on the map
-    buffer_info     : display metadata (buffer sizes, heights) per layer
-    output_path     : if given, save the figure to this path
+    area_geom           : shapely geometry (WGS84) defining the analysis area
+    titulo              : map title
+    layers_poligonos    : dict of layer geometries for boundary drawing
+    layers_para_mostrar : ordered list of layer names to draw on the map
+    buffer_info         : display metadata (buffer sizes, heights) per layer
+    output_path         : if given, save the figure to this path
 
     Returns
     -------
@@ -297,35 +307,33 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
         print("⚠ No grid cells intersect the analysis area.")
         return None
 
-    # Original cell areas (same CRS — WGS84; ratio is dimensionless, so no
-    # reprojection needed here, but we reproject to get stable m² values)
+    # Compute original cell areas in Albers BR (stable m²)
     orig_proj = possible_matches.to_crs(ALBERS_BR)
-    orig_proj.index = possible_matches.index          # align index
-    orig_areas = orig_proj.geometry.area              # m²
+    orig_proj.index = possible_matches.index
+    orig_areas = orig_proj.geometry.area  # Series indexed by possible_matches.index
 
     intersec_proj = intersec.to_crs(ALBERS_BR)
     intersec_proj['area_intersec'] = intersec_proj.geometry.area  # m²
 
-    # Map original area back using the grid's index preserved by overlay
-    # gpd.overlay resets index; use the positional index from possible_matches
+    # gpd.overlay resets the index; map original areas positionally
     intersec_proj['area_original'] = orig_areas.reindex(
         possible_matches.index
     ).values[:len(intersec_proj)]
 
     intersec_proj['frac_area'] = (
         intersec_proj['area_intersec'] / intersec_proj['area_original']
-    ).clip(0, 1)                                       # guard fp rounding
+    ).clip(0, 1)  # guard against floating-point rounding > 1
 
     intersec_proj['TOTAL_POND'] = intersec_proj['TOTAL'] * intersec_proj['frac_area']
-    intersec_proj['area_km2']   = intersec_proj['area_intersec'] / 1e6
+    intersec_proj['area_km2'] = intersec_proj['area_intersec'] / 1e6
     intersec_proj['densidade_pop_km2'] = (
         intersec_proj['TOTAL_POND'] / intersec_proj['area_km2']
     )
 
-    # Carry density back to the WGS84 GeoDataFrame used for plotting
+    # Carry computed columns back to the WGS84 GeoDataFrame used for plotting
     dados = intersec.copy()
     dados['densidade_pop_km2'] = intersec_proj['densidade_pop_km2'].values
-    dados['TOTAL_POND']        = intersec_proj['TOTAL_POND'].values
+    dados['TOTAL_POND'] = intersec_proj['TOTAL_POND'].values
 
     print(f"✓ {len(dados):,} clipped cells (weighted intersection)")
 
