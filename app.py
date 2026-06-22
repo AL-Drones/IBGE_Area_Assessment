@@ -18,7 +18,7 @@ from src import pdf_generator as pdf_gen
 # Page configuration
 st.set_page_config(
     page_title="AL Drones - Flight Area Analysis Tool",
-    page_icon="🛩️",
+    page_icon="🚁",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -216,11 +216,10 @@ st.markdown("""
         border-color: #E0AB25;
     }
 
-    /* SOLUÇÃO SIMPLES: Esconder ícone/seta do expander */
+    /* Hide expander arrow icon */
     .streamlit-expanderHeader svg {
         display: none !important;
     }
-           
     
     details summary {
         list-style: none;
@@ -229,7 +228,6 @@ st.markdown("""
     details summary::-webkit-details-marker {
         display: none;
     }
-    
     
     /* Limit image height */
     .stImage img {
@@ -328,11 +326,11 @@ def create_header():
                  alt="AL Drones Logo" 
                  style="height: 70px; object-fit: contain;">
             <div style="width: 2px; height: 100px; background: linear-gradient(to bottom, transparent, rgba(255,255,255,0.4), transparent);"></div>
-            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/IBGE-Brazil.svg/3840px-IBGE-Brazil.svg.png" 
-                 alt="IBGE Logo" 
+            <img src="https://www.omnibrasil.com.br/assets/home/img/logo-branco-omni.png" 
+                 alt="Omni Logo" 
                  style="height: 70px; object-fit: contain;">
         </div>
-        <h1 style="text-align: center;">Análise da Área de Voo utilizando o censo IBGE 2022</h1>
+        <h1 style="text-align: center;">Análise da Área de Voo</h1>
     </div>
     """, unsafe_allow_html=True)
 
@@ -367,7 +365,6 @@ def main():
     # STEP 1: Upload KML
     if st.session_state['current_step'] >= 1:
         if st.session_state['kml_uploaded']:
-            # Show completed step with edit option
             col1, col2 = st.columns([8, 1])
             with col1:
                 st.markdown(f"""
@@ -401,12 +398,15 @@ def main():
     # STEP 2: Configure Parameters
     if st.session_state['current_step'] >= 2 and st.session_state['kml_uploaded']:
         if st.session_state['parameters_set']:
-            # Show completed step with edit option
             col1, col2 = st.columns([8, 1])
             with col1:
+                adj_label = f", Área Adjacente: {st.session_state.get('adj_size', 0)}m" if st.session_state.get('include_adjacent') else ""
                 st.markdown(f"""
                 <div class="completed-step">
-                    ✓ Etapa 2 concluída: Parâmetros configurados (Altura: {st.session_state.get('height', 0)}m, CV: {st.session_state.get('cv_size', 0)}m, GRB: {st.session_state.get('grb_size', 0)}m)
+                    ✓ Etapa 2 concluída: Parâmetros configurados
+                    (FG: {st.session_state.get('fg_size', 0)}m,
+                    CV: {st.session_state.get('cv_size', 0)}m,
+                    GRB: {st.session_state.get('grb_size', 0)}m{adj_label})
                 </div>
                 """, unsafe_allow_html=True)
             with col2:
@@ -445,7 +445,7 @@ def main():
                 
                 if has_point_or_line and not has_polygon:
                     fg_size = st.number_input(
-                        "Geografia de Voo (m)",
+                        "Geografia de Voo / Flight Geography (m)",
                         min_value=0.0,
                         value=50.0,
                         step=10.0,
@@ -453,48 +453,67 @@ def main():
                     )
                 else:
                     fg_size = 0.0
-                                    
+
                 height = st.number_input(
                     "Altura de Voo (m)",
                     min_value=0.0,
                     value=100.0,
                     step=10.0,
-                    help="Altura de voo em metros"
+                    help="Altura de voo em metros (usada para sugestão do GRB mínimo)"
+                )
+
+                cv_size = st.number_input(
+                    "Volume de Contingência / Contingency Volume (m)",
+                    min_value=0.0,
+                    value=215.0,
+                    step=10.0,
+                    help="Tamanho do volume de contingência em metros"
                 )
             
             with col2:
                 st.markdown("#### Parâmetros de Buffer")
-                cv_size = st.number_input(
-                    "Volume de Contingência (m)",
-                    min_value=215.0,
-                    value=215.0,
-                    step=10.0,
-                    help="Tamanho do volume de contingência (mínimo: 215m)"
-                )
-                
-                # Calculate minimum GRB based on height
-                grb_minimum = gsm.calculate_grb_size(height)
+
+                grb_suggestion = gsm.calculate_grb_size(height)
+                st.caption(f"💡 GRB sugerido com base na altura: **{grb_suggestion:.2f} m**")
+
                 grb_size = st.number_input(
-                    "Distância de Segurança no Solo (m)",
-                    min_value=grb_minimum,
-                    value=grb_minimum,
+                    "Distância de Segurança no Solo / Ground Risk Buffer (m)",
+                    min_value=0.0,
+                    value=float(round(grb_suggestion, 2)),
                     step=10.0,
-                    help=f"Distância de segurança no solo (mínimo calculado: {grb_minimum:.2f}m baseado na altura de voo)"
+                    help="Distância de segurança no solo em metros"
                 )
-                
+
+                include_adjacent = st.checkbox(
+                    "Incluir Área Adjacente / Adjacent Area",
+                    value=True,
+                    help="Marque para incluir a análise da Área Adjacente"
+                )
+
+                adj_size = 5000.0
+                if include_adjacent:
+                    adj_size = st.number_input(
+                        "Área Adjacente / Adjacent Area (m)",
+                        min_value=0.0,
+                        value=5000.0,
+                        step=100.0,
+                        help="Buffer da Área Adjacente a partir do Volume de Contingência"
+                    )
+
                 corner_style = st.selectbox(
                     "Estilo de Cantos",
                     options=['square', 'rounded'],
                     index=0,
                     help="Estilo dos cantos dos buffers"
-                )  
+                )
             
             if st.button("🚀 Iniciar Análise", type="primary"):
-                # Store parameters
                 st.session_state['fg_size'] = fg_size
                 st.session_state['height'] = height
                 st.session_state['cv_size'] = cv_size
                 st.session_state['grb_size'] = grb_size
+                st.session_state['adj_size'] = adj_size
+                st.session_state['include_adjacent'] = include_adjacent
                 st.session_state['corner_style'] = corner_style
                 st.session_state['parameters_set'] = True
                 st.session_state['current_step'] = 3
@@ -514,9 +533,10 @@ def main():
                 height = st.session_state.get('height')
                 cv_size = st.session_state.get('cv_size')
                 grb_size = st.session_state.get('grb_size')
+                adj_size = st.session_state.get('adj_size', 5000.0)
+                include_adjacent = st.session_state.get('include_adjacent', True)
                 corner_style = st.session_state.get('corner_style')
                 
-                # ETAPA 1: Gerar Margens de Segurança
                 status_text.markdown('<div class="step-indicator">📍 Gerando margens de segurança...</div>', unsafe_allow_html=True)
                 progress_bar.progress(10)
                 
@@ -534,6 +554,7 @@ def main():
                     height=height,
                     cv_size=cv_size,
                     grb_size=grb_size,
+                    adj_size=adj_size if include_adjacent else None,
                     corner_style=corner_style
                 )
                 
@@ -542,26 +563,25 @@ def main():
                 with open(result_path, 'rb') as f:
                     kml_data = f.read()
                 
-                # ETAPA 2: Análise Populacional
                 status_text.markdown('<div class="step-indicator">📊 Analisando densidade populacional...</div>', unsafe_allow_html=True)
                 progress_bar.progress(40)
                 
                 analysis_output_dir = os.path.join(output_dir, 'analysis_results')
                 os.makedirs(analysis_output_dir, exist_ok=True)
                 
-                # Prepare buffer info from session state
                 buffer_info = {
-                    'fg_size': st.session_state.get('fg_size', 0),
-                    'cv_size': st.session_state.get('cv_size', 215),
-                    'grb_size': st.session_state.get('grb_size', 0),
-                    'adj_size': st.session_state.get('adj_size', 0) 
+                    'fg_size': fg_size,
+                    'cv_size': cv_size,
+                    'grb_size': grb_size,
+                    'adj_size': adj_size if include_adjacent else None,
                 }
                 
                 results = pa.analyze_population(
-                    result_path, 
+                    result_path,
                     analysis_output_dir,
                     buffer_info=buffer_info,
-                    height=st.session_state.get('height')
+                    height=height,
+                    include_adjacent=include_adjacent
                 )
                 
                 progress_bar.progress(100)
@@ -572,7 +592,8 @@ def main():
                         'stats': results,
                         'output_dir': analysis_output_dir,
                         'kml_data': kml_data,
-                        'buffer_info': buffer_info
+                        'buffer_info': buffer_info,
+                        'include_adjacent': include_adjacent,
                     }
                     st.rerun()
                 else:
@@ -595,31 +616,26 @@ def main():
             analysis_output_dir = st.session_state['analysis_results']['output_dir']
             kml_data = st.session_state['analysis_results']['kml_data']
             buffer_info = st.session_state['analysis_results']['buffer_info']
+            include_adjacent = st.session_state['analysis_results'].get('include_adjacent', True)
             
             st.success("✅ Análise concluída com sucesso!")
             
             st.markdown("---")
             st.markdown("## 📈 Resultados da Análise")
             
-            # Create metrics with color coding
             cols = st.columns(len(results))
-            show_warning = False  # Flag to show warning below results
+            show_warning = False
             
             for idx, (layer_name, stats) in enumerate(results.items()):
                 with cols[idx]:
-                    # Use densidade_maxima for Flight Geography and Ground Risk Buffer
-                    # Use densidade_media for Adjacent Area
                     if layer_name in ['Flight Geography', 'Ground Risk Buffer']:
                         densidade = stats['densidade_maxima']
                         density_label = "Máx"
-                    else:  # Área Adjacente
+                    else:
                         densidade = stats['densidade_media']
                         density_label = "Média"
                     
-                    if layer_name == 'Adjacent Area':
-                        threshold = 50
-                    else:
-                        threshold = 5
+                    threshold = 50 if layer_name == 'Adjacent Area' else 5
                     
                     if densidade > threshold:
                         st.markdown(f"""
@@ -642,11 +658,9 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # Check if warning should be shown
                         if layer_name in ['Flight Geography', 'Ground Risk Buffer'] and 0 < densidade <= 5:
                             show_warning = True
             
-            # Show warning if Flight Geography or GRB has density between 0 and 5
             if show_warning:
                 st.markdown("""
                 <div style="background: rgba(255, 165, 0, 0.1); padding: 1rem; border-radius: 5px; border-left: 4px solid #FFA500; margin-top: 1rem;">
@@ -658,7 +672,6 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Detailed statistics table
             st.markdown("---")
             st.markdown("## 📋 Estatísticas Detalhadas")
             
@@ -675,18 +688,15 @@ def main():
                 })
             
             stats_df = pd.DataFrame(stats_data)
+            st.dataframe(stats_df, use_container_width=True, hide_index=True)
             
-            st.dataframe(
-                stats_df,
-                use_container_width=True,
-                hide_index=True
-            )
-            
+            # Determine maps to show based on include_adjacent
             maps = [
                 ('map_flight_geography.png', 'Geografia de Voo'),
                 ('map_ground_risk_buffer.png', 'Distância de Segurança no Solo'),
-                ('map_adjacent_area.png', 'Área Adjacente')
             ]
+            if include_adjacent:
+                maps.append(('map_adjacent_area.png', 'Área Adjacente'))
             
             for map_file, map_title in maps:
                 map_path = os.path.join(analysis_output_dir, map_file)
@@ -694,64 +704,69 @@ def main():
                     st.markdown(f"### {map_title}")
                     st.image(map_path, use_container_width=True)
             
-            # Download results
             st.markdown("---")
             st.markdown("## 📥 Download dos Resultados")
             
-            col1, col2, col3, col4, col5 = st.columns(5)
-            
-            # PDF download
-            with col1:
-                try:
-                    # Import apenas quando necessário
-                    from src import pdf_generator as pdf_gen
-                    
-                    pdf_data = pdf_gen.generate_pdf_report(
-                        results, 
-                        analysis_output_dir, 
-                        buffer_info,
-                        st.session_state.get('height'),
-                        kml_data=kml_data  # Adicione esta linha
-                    )
-                    st.download_button(
-                        label="📄 Relatório PDF",
-                        data=pdf_data,
-                        file_name=f'relatorio_analise_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf',
-                        mime='application/pdf',
-                        use_container_width=True
-                    )
-                except ImportError:
-                    st.warning("⚠️ Biblioteca reportlab não disponível. Instale com: pip install reportlab")
-                except Exception as e:
-                    st.error(f"Erro ao gerar PDF: {str(e)}")
-            
-            # KML download
-            with col2:
-                st.download_button(
-                    label="📥 Margens KML",
-                    data=kml_data,
-                    file_name='safety_margins.kml',
-                    mime='application/vnd.google-earth.kml+xml',
-                    key='download_kml_final',
-                    use_container_width=True
-                )
-            
-            # Map downloads
-            map_labels = ['📥 IBGE - Geografia de Voo', '📥 IBGE - Ground Risk Buffer', '📥 IBGE - Área Adjacente']
-            for idx, (map_file, map_title) in enumerate(maps):
+            # Build download columns dynamically
+            download_items = [('pdf', None), ('kml', None)]
+            for map_file, map_title in maps:
                 map_path = os.path.join(analysis_output_dir, map_file)
                 if os.path.exists(map_path):
-                    with [col3, col4, col5][idx]:
+                    download_items.append(('map', (map_file, map_title, map_path)))
+            
+            cols_dl = st.columns(len(download_items))
+            
+            for i, (dtype, ddata) in enumerate(download_items):
+                with cols_dl[i]:
+                    if dtype == 'pdf':
+                        try:
+                            from src import pdf_generator as pdf_gen
+                            pdf_data = pdf_gen.generate_pdf_report(
+                                results,
+                                analysis_output_dir,
+                                buffer_info,
+                                st.session_state.get('height'),
+                                kml_data=kml_data
+                            )
+                            st.download_button(
+                                label="📄 Relatório PDF",
+                                data=pdf_data,
+                                file_name=f'relatorio_analise_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf',
+                                mime='application/pdf',
+                                use_container_width=True
+                            )
+                        except ImportError:
+                            st.warning("⚠️ Biblioteca reportlab não disponível.")
+                        except Exception as e:
+                            st.error(f"Erro ao gerar PDF: {str(e)}")
+                    
+                    elif dtype == 'kml':
+                        st.download_button(
+                            label="📥 Margens KML",
+                            data=kml_data,
+                            file_name='safety_margins.kml',
+                            mime='application/vnd.google-earth.kml+xml',
+                            key='download_kml_final',
+                            use_container_width=True
+                        )
+                    
+                    elif dtype == 'map':
+                        map_file, map_title, map_path = ddata
                         with open(map_path, 'rb') as f:
                             file_data = f.read()
-                            st.download_button(
-                                label=map_labels[idx],
-                                data=file_data,
-                                file_name=map_file,
-                                mime='image/png',
-                                use_container_width=True,
-                                key=f"download_map_{idx}"
-                            )
+                        label_map = {
+                            'map_flight_geography.png': '📥 IBGE - Geografia de Voo',
+                            'map_ground_risk_buffer.png': '📥 IBGE - Ground Risk Buffer',
+                            'map_adjacent_area.png': '📥 IBGE - Área Adjacente',
+                        }
+                        st.download_button(
+                            label=label_map.get(map_file, f'📥 {map_title}'),
+                            data=file_data,
+                            file_name=map_file,
+                            mime='image/png',
+                            use_container_width=True,
+                            key=f"download_map_{map_file}"
+                        )
     
     # Footer
     st.markdown("""
