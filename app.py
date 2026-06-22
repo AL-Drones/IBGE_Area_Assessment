@@ -326,11 +326,11 @@ def create_header():
                  alt="AL Drones Logo" 
                  style="height: 70px; object-fit: contain;">
             <div style="width: 2px; height: 100px; background: linear-gradient(to bottom, transparent, rgba(255,255,255,0.4), transparent);"></div>
-            <img src="https://www.omnibrasil.com.br/assets/home/img/logo-branco-omni.png" 
-                 alt="Omni Logo" 
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/IBGE-Brazil.svg/1280px-IBGE-Brazil.svg.png" 
+                 alt="IBGE Logo" 
                  style="height: 70px; object-fit: contain;">
         </div>
-        <h1 style="text-align: center;">Análise da Área de Voo</h1>
+        <h1 style="text-align: center;">Análise da Área de Voo para UAS utilizando o IBGE 2022</h1>
     </div>
     """, unsafe_allow_html=True)
 
