@@ -266,10 +266,10 @@ def create_header():
             <img src="https://aldrones.com.br/wp-content/uploads/2021/01/Logo-branca-2.png"
                  alt="AL Drones Logo" style="height: 70px; object-fit: contain;">
             <div style="width: 2px; height: 100px; background: linear-gradient(to bottom, transparent, rgba(255,255,255,0.4), transparent);"></div>
-            <img src="https://www.omnibrasil.com.br/assets/home/img/logo-branco-omni.png"
-                 alt="Omni Logo" style="height: 70px; object-fit: contain;">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/IBGE-Brazil.svg/1280px-IBGE-Brazil.svg.png"
+                 alt="IBGE Logo" style="height: 70px; object-fit: contain;">
         </div>
-        <h1 style="text-align: center;">Análise da Área de Voo</h1>
+        <h1 style="text-align: center;">Análise da Área de Voo para UAS utilizando o censo IBGE 2022</h1>
     </div>
     """, unsafe_allow_html=True)
 
