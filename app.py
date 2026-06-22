@@ -27,7 +27,7 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Segoe+UI+Emoji&display=swap');
 
     * {
-        font-family: 'Segoe UI Emoji', -apple-system, BlinkMacSystemFont, sans-serif !important;
+        font-family: sans-serif;
     }
 
     #MainMenu {visibility: hidden;}
