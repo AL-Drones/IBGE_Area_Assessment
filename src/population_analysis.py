@@ -2,6 +2,14 @@
 AL Drones - Population Analysis Tool
 Analyzes population density in drone flight areas using IBGE data.
 Uses the unified 1km grid (BR1KM_20251002) from IBGE Census 2022.
+
+Performance notes
+-----------------
+- The ZIP is downloaded once and extracted to BR1KM_DIR on disk.
+- Subsequent runs skip the download entirely (_encontrar_shp detects the .shp).
+- gpd.read_file(..., bbox=...) lets GDAL spatial-filter at read time, so only
+  cells inside the bounding box of the analysis area are loaded into memory.
+  No need to cache the full Brazil grid or build an in-memory R-tree index.
 """
 
 import os
@@ -53,12 +61,9 @@ BR1KM_URL = (
 )
 BR1KM_DIR = "dados_ibge/grade_1km"
 
-# In-memory cache — loaded once per process
-_GRID_1KM = None
-
 
 # ---------------------------------------------------------------------------
-# Grid loading
+# Grid helpers
 # ---------------------------------------------------------------------------
 
 def _encontrar_shp(pasta: str) -> str | None:
@@ -71,45 +76,56 @@ def _encontrar_shp(pasta: str) -> str | None:
     return None
 
 
-def carregar_grid_1km() -> gpd.GeoDataFrame:
+def garantir_grid_disponivel() -> str | None:
     """
-    Download (once) and load the IBGE 1km unified grid for Brazil.
-    The result is cached in memory for the lifetime of the process.
-    The shapefile name inside the ZIP may vary between IBGE releases
-    (e.g. BR1KM.shp or BR1KM_20251002.shp); _encontrar_shp handles that.
-    """
-    global _GRID_1KM
+    Ensure the BR1KM shapefile is present on disk, downloading and extracting
+    the ZIP if necessary.  Returns the path to the .shp file, or None on error.
 
-    if _GRID_1KM is not None:
-        return _GRID_1KM
+    No data is loaded into memory here — callers use gpd.read_file(..., bbox=)
+    to load only the slice they need.
+    """
+    shp_path = _encontrar_shp(BR1KM_DIR)
+    if shp_path is not None:
+        return shp_path  # already on disk, nothing to do
 
     os.makedirs(BR1KM_DIR, exist_ok=True)
-
-    shp_path = _encontrar_shp(BR1KM_DIR)
-
-    if shp_path is None:
-        print("⬇ Downloading BR1KM grid (one-time operation, ~large file)...")
-        try:
-            resp = requests.get(BR1KM_URL, timeout=300, stream=True)
-            resp.raise_for_status()
-            raw = b"".join(resp.iter_content(chunk_size=1 << 20))
-            with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                z.extractall(BR1KM_DIR)
-            print("✓ BR1KM grid downloaded and extracted.")
-        except Exception as exc:
-            print(f"✗ Error downloading BR1KM grid: {exc}")
-            return None
-
-        shp_path = _encontrar_shp(BR1KM_DIR)
-
-    if shp_path is None:
-        print("✗ No .shp file found after extraction — check the ZIP contents.")
+    print("⬇ Downloading BR1KM grid (one-time operation, ~large file)...")
+    try:
+        resp = requests.get(BR1KM_URL, timeout=300, stream=True)
+        resp.raise_for_status()
+        raw = b"".join(resp.iter_content(chunk_size=1 << 20))
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            z.extractall(BR1KM_DIR)
+        print("✓ BR1KM grid downloaded and extracted.")
+    except Exception as exc:
+        print(f"✗ Error downloading BR1KM grid: {exc}")
         return None
 
-    print(f"⏳ Loading {os.path.basename(shp_path)} into memory...")
-    _GRID_1KM = gpd.read_file(shp_path).to_crs(epsg=4326)
-    print(f"✓ BR1KM grid loaded: {len(_GRID_1KM):,} cells")
-    return _GRID_1KM
+    shp_path = _encontrar_shp(BR1KM_DIR)
+    if shp_path is None:
+        print("✗ No .shp file found after extraction — check the ZIP contents.")
+    return shp_path
+
+
+def carregar_celulas_area(shp_path: str, area_geom) -> gpd.GeoDataFrame | None:
+    """
+    Read only the grid cells that fall within the bounding box of *area_geom*
+    using GDAL's native spatial filter (bbox parameter).  Fast even for the
+    full-Brazil shapefile because GDAL uses the .shx/.qix spatial index.
+
+    Returns a GeoDataFrame in EPSG:4326, or None if no cells are found.
+    """
+    minx, miny, maxx, maxy = area_geom.bounds
+    dados = gpd.read_file(shp_path, bbox=(minx, miny, maxx, maxy))
+
+    if dados.crs is None:
+        dados = dados.set_crs(epsg=4326)
+    else:
+        dados = dados.to_crs(epsg=4326)
+
+    if dados.empty:
+        return None
+    return dados
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +239,7 @@ def calcular_estatisticas(dados_proj: gpd.GeoDataFrame, area_geom=None) -> tuple
     Compute summary statistics from a projected (Albers) GeoDataFrame.
 
     Uses TOTAL_POND (area-weighted population) when present; falls back to
-    raw TOTAL otherwise.  densidade_maxima is the highest per-cell density
-    among the clipped cells, also weighted.
+    raw TOTAL otherwise.
 
     Returns:
         (total_pessoas, area_km2, densidade_media, densidade_maxima)
@@ -255,51 +270,46 @@ def calcular_estatisticas(dados_proj: gpd.GeoDataFrame, area_geom=None) -> tuple
 # ---------------------------------------------------------------------------
 
 def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
-                   layers_para_mostrar: list, buffer_info: dict = None,
+                   layers_para_mostrar: list, shp_path: str,
+                   buffer_info: dict = None,
                    output_path: str = None) -> dict | None:
     """
-    Clip the BR1KM grid to *area_geom* using weighted intersection,
-    compute density, and render a map.
+    Load grid cells for *area_geom* from *shp_path* using a bbox spatial
+    filter, apply weighted intersection, compute density, and render a map.
 
-    Weighted intersection:
-        frac_area   = clipped_cell_area / original_cell_area
-        TOTAL_POND  = TOTAL * frac_area
+    Weighted intersection
+    ---------------------
+        frac_area  = clipped_cell_area / original_cell_area
+        TOTAL_POND = TOTAL * frac_area
 
     Parameters
     ----------
-    area_geom           : shapely geometry (WGS84) defining the analysis area
+    area_geom           : shapely geometry (WGS84)
     titulo              : map title
     layers_poligonos    : dict of layer geometries for boundary drawing
-    layers_para_mostrar : ordered list of layer names to draw on the map
-    buffer_info         : display metadata (buffer sizes, heights) per layer
-    output_path         : if given, save the figure to this path
+    layers_para_mostrar : ordered list of layer names to draw
+    shp_path            : path to the BR1KM .shp file on disk
+    buffer_info         : display metadata per layer
+    output_path         : if given, save the PNG to this path
 
     Returns
     -------
-    dict with keys total_pessoas, area_km2, densidade_media, densidade_maxima
+    dict with total_pessoas, area_km2, densidade_media, densidade_maxima
     or None on failure.
     """
     print(f"\n{'='*60}")
     print(f"Processing: {titulo}")
     print(f"{'='*60}")
 
-    grid = carregar_grid_1km()
-    if grid is None:
-        print("✗ BR1KM grid unavailable — aborting.")
-        return None
-
-    # --- Step 1: R-tree pre-filter (bounding box) ---
-    candidate_idx = list(grid.sindex.intersection(area_geom.bounds))
-    if not candidate_idx:
+    # --- Step 1: bbox-filtered read (GDAL spatial filter, very fast) ---
+    possible_matches = carregar_celulas_area(shp_path, area_geom)
+    if possible_matches is None:
         print("⚠ No grid cells found in bounding box.")
         return None
 
-    possible_matches = grid.iloc[candidate_idx].copy()
+    print(f"✓ {len(possible_matches):,} cells in bounding box")
 
     # --- Step 2: Weighted intersection ---
-    # Overlay keeps only the portion of each cell that falls inside area_geom.
-    # frac_area = clipped_cell_area / original_cell_area
-    # TOTAL_POND = TOTAL * frac_area  (population proportional to covered area)
     area_gdf = gpd.GeoDataFrame(geometry=[area_geom], crs=possible_matches.crs)
     intersec = gpd.overlay(possible_matches, area_gdf, how='intersection')
 
@@ -307,22 +317,22 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
         print("⚠ No grid cells intersect the analysis area.")
         return None
 
-    # Compute original cell areas in Albers BR (stable m²)
+    # Original cell areas in Albers BR (stable m²)
     orig_proj = possible_matches.to_crs(ALBERS_BR)
     orig_proj.index = possible_matches.index
-    orig_areas = orig_proj.geometry.area  # Series indexed by possible_matches.index
+    orig_areas = orig_proj.geometry.area  # indexed by possible_matches.index
 
     intersec_proj = intersec.to_crs(ALBERS_BR)
-    intersec_proj['area_intersec'] = intersec_proj.geometry.area  # m²
+    intersec_proj['area_intersec'] = intersec_proj.geometry.area
 
-    # gpd.overlay resets the index; map original areas positionally
+    # gpd.overlay resets index — map original areas positionally
     intersec_proj['area_original'] = orig_areas.reindex(
         possible_matches.index
     ).values[:len(intersec_proj)]
 
     intersec_proj['frac_area'] = (
         intersec_proj['area_intersec'] / intersec_proj['area_original']
-    ).clip(0, 1)  # guard against floating-point rounding > 1
+    ).clip(0, 1)
 
     intersec_proj['TOTAL_POND'] = intersec_proj['TOTAL'] * intersec_proj['frac_area']
     intersec_proj['area_km2'] = intersec_proj['area_intersec'] / 1e6
@@ -330,7 +340,6 @@ def processar_grid(area_geom, titulo: str, layers_poligonos: dict,
         intersec_proj['TOTAL_POND'] / intersec_proj['area_km2']
     )
 
-    # Carry computed columns back to the WGS84 GeoDataFrame used for plotting
     dados = intersec.copy()
     dados['densidade_pop_km2'] = intersec_proj['densidade_pop_km2'].values
     dados['TOTAL_POND'] = intersec_proj['TOTAL_POND'].values
@@ -454,6 +463,11 @@ def analyze_population(kml_file: str, output_dir: str = 'results',
     """
     os.makedirs(output_dir, exist_ok=True)
 
+    # Ensure the shapefile is on disk (downloads once if needed)
+    shp_path = garantir_grid_disponivel()
+    if shp_path is None:
+        return None
+
     if buffer_info is None:
         buffer_info_display = DEFAULT_BUFFER_INFO
     else:
@@ -477,6 +491,13 @@ def analyze_population(kml_file: str, output_dir: str = 'results',
         print("✗ No valid layers found in KML")
         return None
 
+    # Shared kwargs to avoid repetition
+    grid_kwargs = dict(
+        layers_poligonos=layers_poligonos,
+        shp_path=shp_path,
+        buffer_info=buffer_info_display,
+    )
+
     results = {}
 
     # Map 1 — Flight Geography
@@ -484,27 +505,24 @@ def analyze_population(kml_file: str, output_dir: str = 'results',
         stats = processar_grid(
             area_geom=layers_poligonos['Flight Geography'],
             titulo="Densidade Populacional - Geografia de Voo",
-            layers_poligonos=layers_poligonos,
             layers_para_mostrar=['Flight Geography'],
-            buffer_info=buffer_info_display,
             output_path=os.path.join(output_dir, 'map_flight_geography.png'),
+            **grid_kwargs,
         )
         if stats:
             results['Flight Geography'] = stats
 
     # Map 2 — Ground Risk Buffer (shows FG + CV + GRB)
     if 'Ground Risk Buffer' in layers_poligonos:
-        layers_grb = [
-            l for l in ['Flight Geography', 'Contingency Volume', 'Ground Risk Buffer']
-            if l in layers_poligonos
-        ]
         stats = processar_grid(
             area_geom=layers_poligonos['Ground Risk Buffer'],
             titulo="Densidade Populacional - Distância de Segurança no Solo",
-            layers_poligonos=layers_poligonos,
-            layers_para_mostrar=layers_grb,
-            buffer_info=buffer_info_display,
+            layers_para_mostrar=[
+                l for l in ['Flight Geography', 'Contingency Volume', 'Ground Risk Buffer']
+                if l in layers_poligonos
+            ],
             output_path=os.path.join(output_dir, 'map_ground_risk_buffer.png'),
+            **grid_kwargs,
         )
         if stats:
             results['Ground Risk Buffer'] = stats
@@ -515,18 +533,16 @@ def analyze_population(kml_file: str, output_dir: str = 'results',
             area_anel = layers_poligonos['Adjacent Area'].difference(
                 layers_poligonos['Ground Risk Buffer']
             )
-            layers_adj = [
-                l for l in ['Flight Geography', 'Contingency Volume',
-                             'Ground Risk Buffer', 'Adjacent Area']
-                if l in layers_poligonos
-            ]
             stats = processar_grid(
                 area_geom=area_anel,
                 titulo="Densidade Populacional - Área Adjacente",
-                layers_poligonos=layers_poligonos,
-                layers_para_mostrar=layers_adj,
-                buffer_info=buffer_info_display,
+                layers_para_mostrar=[
+                    l for l in ['Flight Geography', 'Contingency Volume',
+                                 'Ground Risk Buffer', 'Adjacent Area']
+                    if l in layers_poligonos
+                ],
                 output_path=os.path.join(output_dir, 'map_adjacent_area.png'),
+                **grid_kwargs,
             )
             if stats:
                 results['Adjacent Area'] = stats
