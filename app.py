@@ -18,7 +18,7 @@ from src import pdf_generator as pdf_gen
 # Page configuration
 st.set_page_config(
     page_title="AL Drones - Flight Area Analysis Tool",
-    page_icon="🚁",
+    page_icon="🛩️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -328,11 +328,11 @@ def create_header():
                  alt="AL Drones Logo" 
                  style="height: 70px; object-fit: contain;">
             <div style="width: 2px; height: 100px; background: linear-gradient(to bottom, transparent, rgba(255,255,255,0.4), transparent);"></div>
-            <img src="https://www.omnibrasil.com.br/assets/home/img/logo-branco-omni.png" 
-                 alt="Omni Logo" 
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/IBGE-Brazil.svg/3840px-IBGE-Brazil.svg.png" 
+                 alt="IBGE Logo" 
                  style="height: 70px; object-fit: contain;">
         </div>
-        <h1 style="text-align: center;">Análise da Área de Voo para o SwissDrones SDO 50 V3</h1>
+        <h1 style="text-align: center;">Análise da Área de Voo utilizando o censo IBGE 2022</h1>
     </div>
     """, unsafe_allow_html=True)
 
@@ -554,7 +554,7 @@ def main():
                     'fg_size': st.session_state.get('fg_size', 0),
                     'cv_size': st.session_state.get('cv_size', 215),
                     'grb_size': st.session_state.get('grb_size', 0),
-                    'adj_size': 5000  # Adjacent Area é sempre 5000m
+                    'adj_size': st.session_state.get('adj_size', 0) 
                 }
                 
                 results = pa.analyze_population(
